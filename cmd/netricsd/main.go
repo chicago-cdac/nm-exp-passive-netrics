@@ -2,39 +2,43 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/sevlyar/go-daemon"
-	"fmt"
-	"strconv"
 )
 
-// work with offline capture 
+// work with offline capture
 
 var (
 	signal = flag.String("s", "", `Send signal to the daemon:
   stop — shutdown`)
-	input = flag.String("r", "", "Proccess offline pcap as input.")
-	device = flag.String("i", "en0", "Interface to capture")
+	input        = flag.String("r", "", "Proccess offline pcap as input.")
+	device       = flag.String("i", "en0", "Interface to capture")
 	snapshot_len = flag.String("slen", "96", "snapshot length")
-	filter = flag.String("f", "", "capture filter")
-	ethLayer layers.Ethernet
-	ipLayer  layers.IPv4
-	ip6Layer layers.IPv6 // TODO: Add it for ipv6 traffc
-	tcpLayer layers.TCP //not using right now
-	udpLayer layers.UDP //not using right now
-	promiscuous bool = false
-	timeout time.Duration = 30 *time.Second
-	handle *pcap.Handle
-	err error
+	filter       = flag.String("f", "", "capture filter")
+	ethLayer     layers.Ethernet
+	ipLayer      layers.IPv4
+	ip6Layer     layers.IPv6   // TODO: Add it for ipv6 traffc
+	tcpLayer     layers.TCP    //not using right now
+	udpLayer     layers.UDP    //not using right now
+	promiscuous  bool          = false
+	timeout      time.Duration = 30 * time.Second
+	handle       *pcap.Handle
+	err          error
+)
 
-
+var (
+	stop = make(chan struct{})
+	done = make(chan struct{})
 )
 
 const logFileName = "netricsd.log"
@@ -43,8 +47,8 @@ const dataLogFilePref = "nm_passive_consumption"
 
 // saves the data to a file
 func flush_data(timestamp int64, data [60]int) {
-	//new file for every minute 
-	//define a constant for the file name template  
+	//new file for every minute
+	//define a constant for the file name template
 	fname := fmt.Sprintf("%s_%d.csv", dataLogFilePref, timestamp)
 	f, err := os.OpenFile(fname, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0640)
 	if err != nil {
@@ -63,33 +67,11 @@ func flush_data(timestamp int64, data [60]int) {
 	fmt.Println("Data written for %d", timestamp)
 }
 
-
-
 func main() {
 	//var pcapoffline string
 	flag.Parse()
-	snapshot_len_int, err :=  strconv.Atoi(*snapshot_len)
+
 	//fmt.Printf("%s %s", *device, *input)
-
-	if len(*device) > 0 {
-	    fmt.Println("entered here")
-	    handle, err = pcap.OpenLive(*device, int32(snapshot_len_int), promiscuous, timeout)
-	    if err != nil {log.Fatal(err) }
-
-	    if *filter != "" {
-		err = handle.SetBPFFilter(*filter)
-		if err != nil { log.Fatal(err) }
-	    }
-	} else if len(*input) > 0 {
-	    log.Printf("opening pcap file %s", *input) 
-	    handle, err = pcap.OpenOffline(*input)
-	    if err != nil { log.Fatal(err) }
-	    //defer handle.Close()
-	} else {
-	    fmt.Println("entered here too")
-	    log.Printf("%s %s", *input, *device)
-	    log.Fatal("Specify either device or pcap file %s %s", *input, *device)
-	}
 
 	daemon.AddCommand(daemon.StringFlag(signal, "stop"), syscall.SIGTERM, termHandler)
 
@@ -100,7 +82,7 @@ func main() {
 		LogFilePerm: 0640,
 		WorkDir:     "./",
 		Umask:       027,
-		Args:        []string{"netricsd"},
+		Args:        nil,
 	}
 
 	if len(daemon.ActiveFlags()) > 0 {
@@ -127,7 +109,7 @@ func main() {
 
 	//setupLog()
 
-	go worker(handle)
+	go worker()
 
 	err = daemon.ServeSignals()
 	if err != nil {
@@ -155,21 +137,43 @@ func setupLog() {
 	}()
 }
 
-var (
-	stop = make(chan struct{})
-	done = make(chan struct{})
-)
+func worker() {
+	snapshot_len_int, err := strconv.Atoi(*snapshot_len)
+	if len(*device) > 0 {
+		fmt.Println("entered here [%s]", *device)
+		handle, err = pcap.OpenLive(*device, int32(snapshot_len_int), promiscuous, timeout)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-func worker(handle *pcap.Handle) {
-    defer handle.Close()
-   // Use the handle as a packet source to process all packets
-    packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-    currentMin := int64(-1)
-    var newTime, newMin, newSec int64
+		if *filter != "" {
+			err = handle.SetBPFFilter(*filter)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	} else if len(*input) > 0 {
+		log.Printf("opening pcap file %s", *input)
+		handle, err = pcap.OpenOffline(*input)
+		if err != nil {
+			log.Fatal(err)
+		}
+		//defer handle.Close()
+	} else {
+		fmt.Println("entered here too")
+		log.Printf("%s %s", *input, *device)
+		log.Fatal("Specify either device or pcap file %s %s", *input, *device)
+	}
 
-    var per_minute_log [60] int
-    LOOP:
-	    for packet := range packetSource.Packets() {
+	defer handle.Close()
+	// Use the handle as a packet source to process all packets
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	currentMin := int64(-1)
+	var newTime, newMin, newSec int64
+
+	var per_minute_log [60]int
+LOOP:
+	for packet := range packetSource.Packets() {
 
 		parser := gopacket.NewDecodingLayerParser(
 			layers.LayerTypeEthernet,
@@ -187,29 +191,29 @@ func worker(handle *pcap.Handle) {
 
 		for _, layerType := range foundLayerTypes {
 			if layerType == layers.LayerTypeIPv4 {
-			//filtering logic here. Skip all the measurement traffic from the pi
+				//filtering logic here. Skip all the measurement traffic from the pi
 			}
 		}
 
 		newTime = packet.Metadata().Timestamp.Unix()
-		newMin = 60*int64(newTime / 60)
+		newMin = 60 * int64(newTime/60)
 		newSec = newTime % 60
 		if currentMin != newMin {
 			if currentMin != -1 {
 				flush_data(currentMin, per_minute_log)
 			}
 			currentMin = newMin
-			per_minute_log = [60] int{}
+			per_minute_log = [60]int{}
 		}
 
 		per_minute_log[newSec] += int(ipLayer.Length)
 
 		select {
-			case <-stop:
-				break LOOP
-			default:
+		case <-stop:
+			break LOOP
+		default:
 		}
-	    }
+	}
 	//flush remaining data
 	flush_data(currentMin, per_minute_log)
 	log.Printf("%s: Exiting daemon", time.Now().String())
