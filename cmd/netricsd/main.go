@@ -17,6 +17,8 @@ import (
 )
 
 // work with offline capture
+const Ticker = 1 // Process packets every (Ticker) Seconds 
+
 
 var (
 	signal = flag.String("s", "", `Send signal to the daemon:
@@ -31,7 +33,7 @@ var (
 	tcpLayer     layers.TCP    //not using right now
 	udpLayer     layers.UDP    //not using right now
 	promiscuous  bool          = false
-	timeout      time.Duration = 30 * time.Second
+	timeout      time.Duration = Ticker * time.Second
 	handle       *pcap.Handle
 	err          error
 )
@@ -79,7 +81,8 @@ func main() {
 		PidFileName: pidFileName,
 		PidFilePerm: 0644,
 		LogFileName: logFileName,
-		LogFilePerm: 0640,
+		//LogFileName: "/dev/stdout",
+	        LogFilePerm: 0640,
 		WorkDir:     "./",
 		Umask:       027,
 		Args:        nil,
@@ -168,20 +171,19 @@ func worker() {
 	defer handle.Close()
 	// Use the handle as a packet source to process all packets
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+
 	currentMin := int64(-1)
 	var newTime, newMin, newSec int64
 
 	var per_minute_log [60]int
+	parser := gopacket.NewDecodingLayerParser(
+		layers.LayerTypeEthernet,
+		&ethLayer,
+		&ipLayer,
+		&ip6Layer,
+	)
 LOOP:
 	for packet := range packetSource.Packets() {
-
-		parser := gopacket.NewDecodingLayerParser(
-			layers.LayerTypeEthernet,
-			&ethLayer,
-			&ipLayer,
-			&ip6Layer,
-		)
-
 		foundLayerTypes := []gopacket.LayerType{}
 
 		err := parser.DecodeLayers(packet.Data(), &foundLayerTypes)
@@ -214,6 +216,7 @@ LOOP:
 		default:
 		}
 	}
+
 	//flush remaining data
 	flush_data(currentMin, per_minute_log)
 	log.Printf("%s: Exiting daemon", time.Now().String())
